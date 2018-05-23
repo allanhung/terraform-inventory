@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 )
 
 type counterSorter struct {
@@ -29,6 +30,18 @@ type allGroup struct {
 	Vars  map[string]interface{} `json:"vars"`
 }
 
+type AnsibleInv struct {
+	Children []string                  `json:"children"`
+}
+
+type AnsibleMeta struct {
+	HostVars map[string]interface{}    `json:"hostvars"`
+}
+
+type AnsibleGroup struct {
+	Group    map[string][]string
+}
+
 func appendUniq(strs []string, item string) []string {
 	if len(strs) == 0 {
 		strs = append(strs, item)
@@ -41,6 +54,49 @@ func appendUniq(strs []string, item string) []string {
 	}
 	return strs
 }
+
+func gatherAnsibleResources(s *state) map[string]interface{} {
+    outputGroups := make(map[string]interface{})
+
+    all := &AnsibleInv{Children: make([]string, 0)}
+    meta := &AnsibleMeta{HostVars: make(map[string]interface{})}
+    ansible_group := &AnsibleGroup{Group: make(map[string][]string)}
+
+    for _, res := range s.resources() {
+        if res.resourceType == "aws_instance" {
+            // place in list of all resources
+            // all.Hosts = appendUniq(all.Hosts, res.Address())
+            group_name := res.Attributes()["tags.ansible_group"]
+			host_name := fmt.Sprintf("%s.%s.aws", res.baseName, res.Attributes()["availability_zone"])
+            all.Children = appendUniq(all.Children, group_name)
+            ansible_group.Group[group_name] = append(ansible_group.Group[group_name], host_name)
+            // inventorize outputs as variables
+            if len(s.outputs()) > 0 {
+                hostvars := make(map[string]interface{})
+                for _, out := range s.outputs() {
+                    if strings.Contains(out.keyName, fmt.Sprintf("%s_%s", res.resourceType, res.baseName)) {
+					    var n string
+                        keyname := strings.Replace(out.keyName, fmt.Sprintf("%s_%s_", res.resourceType, res.baseName), n, 1)
+                        hostvars[keyname]=out.value
+                    }
+                }
+                meta.HostVars[host_name] = hostvars
+            }
+        }
+    }
+
+    outputGroups["all"] = all
+    outputGroups["_meta"] = meta
+
+    for k, v := range ansible_group.Group {
+	    group_host := make(map[string][]string)
+		group_host["hosts"] = v
+        outputGroups[k] = group_host
+    }
+
+	return outputGroups
+}
+
 
 func gatherResources(s *state) map[string]interface{} {
 	outputGroups := make(map[string]interface{})
@@ -128,7 +184,7 @@ func gatherResources(s *state) map[string]interface{} {
 }
 
 func cmdList(stdout io.Writer, stderr io.Writer, s *state) int {
-	return output(stdout, stderr, gatherResources(s))
+	return output(stdout, stderr, gatherAnsibleResources(s))
 }
 
 func cmdInventory(stdout io.Writer, stderr io.Writer, s *state) int {
